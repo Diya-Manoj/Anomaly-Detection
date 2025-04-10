@@ -38,7 +38,7 @@ if uploaded_video:
 
     # Load model
     model = ConvAutoencoder().to(device)
-    model.load_state_dict(torch.load("autoencoder.pth", map_location=device))  # Load your trained model
+    model.load_state_dict(torch.load("cnn_autoencoder_anomaly.pt", map_location=device))  # Load your trained model
     model.eval()
 
     # Inference
