@@ -23,8 +23,7 @@ st.sidebar.markdown("""---
 - Decoder: 3 Transposed Conv layers
 
 ### 👩‍💻 Credits
-Developed by Your Name
-Streamlit UI by ChatGPT
+Developed by Diya Manoj
 """)
 
 # Load model
