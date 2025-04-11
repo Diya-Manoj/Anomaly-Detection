@@ -10,7 +10,7 @@ from tempfile import NamedTemporaryFile
 from PIL import Image
 
 st.set_page_config(layout="wide", page_title="AI-Powered Anomaly Detection")
-st.markdown("# AI-Powered Anomaly Detection in Surveillance🎥")
+st.markdown("# Anomaly Detection in Surveillance🎥")
 
 # Sidebar: model info, threshold, download, credits
 st.sidebar.title("🔧 Settings & Info")
