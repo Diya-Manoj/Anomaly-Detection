@@ -1,4 +1,6 @@
 import streamlit as st
+import torch
+import torchvision.transforms as transforms
 import numpy as np
 import cv2
 import os
@@ -6,94 +8,102 @@ from model import ConvAutoencoder
 from matplotlib import pyplot as plt
 from tempfile import NamedTemporaryFile
 from PIL import Image
-import torch
-import torch.nn as nn  # Added import for nn.Module usage
-import torchvision.transforms as transforms
+
+st.set_page_config(layout="wide", page_title="AI-Powered Anomaly Detection")
+st.markdown("# AI-Powered Anomaly Detection in Surveillance🎥")
+
+# Sidebar: model info, threshold, download, credits
+st.sidebar.title("🔧 Settings & Info")
+thresh_slider = st.sidebar.slider("Anomaly Threshold (0.01 is usually used)", min_value=0.0, max_value=0.1, value=0.005, step=0.0005)
+st.sidebar.markdown("""---
+### ℹ️ Model Info
+- Type: CNN Autoencoder
+- Input: Grayscale 128x128
+- Encoder: 3 Conv layers
+- Decoder: 3 Transposed Conv layers
+
+### 👩‍💻 Credits
+Developed by Diya Manoj
+""")
 
 # Load model
-@st.cache_resource
-def load_model(model_path='model.pth'):
-    model = ConvAutoencoder()
-    model.load_state_dict(torch.load(model_path, map_location=torch.device('cpu')))
-    model.eval()
-    return model
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = ConvAutoencoder().to(device)
+checkpoint = torch.load("cnn_autoencoder_anomaly.pt", map_location=device)
+model.load_state_dict(checkpoint)
+model.eval()
 
-model = load_model()
+transform = transforms.Compose([
+    transforms.ToTensor(),
+])
 
-# Title and Sidebar
-st.set_page_config(page_title="Anomaly Detection", layout="wide")
-st.sidebar.title("🔍 Anomaly Detector")
-st.sidebar.markdown("Adjust settings or upload video.")
+def preprocess_frame(frame):
+    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    frame = cv2.resize(frame, (128, 128))
+    tensor = transform(frame).unsqueeze(0).to(device)
+    return tensor, frame
 
-threshold = st.sidebar.slider("Anomaly Threshold (0.01 is frequently used", 0.0, 1.0, 0.1, step=0.01)
-st.sidebar.markdown("---")
-st.sidebar.markdown("📊 **Model Info**\n- Type: CNN Autoencoder\n- Framework: PyTorch")
+def get_reconstruction_error(original, reconstructed):
+    return torch.mean((original - reconstructed) ** 2).item()
 
-# Upload Video
-video_file = st.file_uploader("Upload a surveillance video", type=["mp4", "avi", "mov"])
-top_anomalies = []
+# Upload input
+uploaded_file = st.file_uploader("Upload video or image", type=["jpg", "jpeg", "png", "mp4", "avi", "mpeg4"])
 
-if video_file:
-    tfile = NamedTemporaryFile(delete=False)
-    tfile.write(video_file.read())
+if uploaded_file:
+    filename = uploaded_file.name
+    file_ext = filename.split(".")[-1].lower()
+    bytes_data = uploaded_file.read()
 
-    cap = cv2.VideoCapture(tfile.name)
-    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    stframe = st.empty()
+    with NamedTemporaryFile(delete=False, suffix=f".{file_ext}") as tmp:
+        tmp.write(bytes_data)
+        temp_path = tmp.name
 
-    anomaly_scores = []
-    frame_list = []
+    # Process image
+    if file_ext in ["jpg", "jpeg", "png"]:
+        image = Image.open(temp_path).convert("L").resize((128, 128))
+        input_tensor = transform(image).unsqueeze(0).to(device)
+        with torch.no_grad():
+            reconstructed = model(input_tensor)
+        error = get_reconstruction_error(input_tensor, reconstructed)
 
-    transform = transforms.Compose([
-        transforms.ToPILImage(),
-        transforms.Resize((128, 128)),
-        transforms.ToTensor()
-    ])
+        st.image(image, caption=f"Reconstruction Error: {error:.4f}", use_column_width=True)
 
-    with st.spinner("🔍 Analyzing video..."):
-        for i in range(frame_count):
-            ret, frame = cap.read()
-            if not ret:
-                break
+    # Process video
+    elif file_ext in ["mp4", "avi", "mpeg4"]:
+        with st.spinner("🔃Analyzing video frames..."):
+            cap = cv2.VideoCapture(temp_path)
+            errors = []
+            frames = []
+            heatmaps = []
+        
+            while cap.isOpened():
+                ret, frame = cap.read()
+                if not ret:
+                    break
+        
+                tensor, raw_frame = preprocess_frame(frame)
+                with torch.no_grad():
+                    reconstructed = model(tensor)
+        
+                error = get_reconstruction_error(tensor, reconstructed)
+                errors.append(error)
+                frames.append(raw_frame)
+        cap.release()
 
-            frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            frame_resized = cv2.resize(frame_gray, (128, 128))
-            frame_tensor = transform(frame_resized).unsqueeze(0)
+        # Show graph
+        st.markdown("### 📈 Reconstruction Error Over Time")
+        st.line_chart(errors)
 
-            with torch.no_grad():
-                reconstructed = model(frame_tensor)
-                loss = torch.mean((frame_tensor - reconstructed) ** 2).item()
-                anomaly_scores.append(loss)
-                frame_list.append(frame)
+        # Show top anomalies
+        anomalies = [(i, e) for i, e in enumerate(errors) if e > thresh_slider]
+        anomalies.sort(key=lambda x: x[1], reverse=True)
 
-            if loss > threshold:
-                top_anomalies.append((loss, frame))
+        st.markdown("### 🔥 Top Anomalies")
+        cols = st.columns(min(3, len(anomalies)))
+        for i, (idx, err) in enumerate(anomalies[:len(cols)]):
+            with cols[i % len(cols)]:
+                st.image(frames[idx], caption=f"Frame {idx} - Error: {err:.4f}", use_column_width=True)
 
-    cap.release()
-
-    st.success("✅ Analysis Complete!")
-
-    # Plot error graph
-    st.subheader("📈 Anomaly Score Over Time")
-    fig, ax = plt.subplots()
-    ax.plot(anomaly_scores, label="Reconstruction Error")
-    ax.axhline(y=threshold, color='r', linestyle='--', label="Threshold")
-    ax.set_xlabel("Frame")
-    ax.set_ylabel("Error")
-    ax.legend()
-    st.pyplot(fig)
-
-    # Top anomalies
-    if top_anomalies:
-        top_anomalies.sort(reverse=True, key=lambda x: x[0])
-        st.subheader("🔥 Top Anomalies")
-        cols = st.columns(3)
-
-        for i, (score, frame) in enumerate(top_anomalies[:6]):
-            with cols[i % 3]:
-                st.image(frame, caption=f"Score: {score:.4f}", use_container_width=True)
-    else:
-        st.info("No significant anomalies detected above the threshold.")
-
-else:
-    st.warning("📤 Please upload a video file to begin anomaly detection.")
+        # Save anomaly logs
+        log_txt = "Frame,Error\n" + "\n".join([f"{idx},{err:.6f}" for idx, err in anomalies])
+        st.sidebar.download_button("📥 Download Anomaly Log", data=log_txt, file_name="anomaly_log.csv")
