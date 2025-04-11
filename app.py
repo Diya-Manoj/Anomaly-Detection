@@ -1,19 +1,15 @@
 import streamlit as st
 import torch
 import torch.nn as nn
-import torchvision.transforms as transforms
+import torch.nn.functional as F
 import numpy as np
 import cv2
 from PIL import Image
 
-# ------------------------
-# Define the Model
-# ------------------------
+# Define the CNN Autoencoder
 class ConvAutoencoder(nn.Module):
     def __init__(self):
         super(ConvAutoencoder, self).__init__()
-
-        # Encoder
         self.encoder = nn.Sequential(
             nn.Conv2d(1, 16, 3, stride=2, padding=1),  # -> (16, 64, 64)
             nn.ReLU(),
@@ -22,8 +18,6 @@ class ConvAutoencoder(nn.Module):
             nn.Conv2d(32, 64, 3, stride=2, padding=1), # -> (64, 16, 16)
             nn.ReLU()
         )
-
-        # Decoder
         self.decoder = nn.Sequential(
             nn.ConvTranspose2d(64, 32, 3, stride=2, padding=1, output_padding=1), # -> (32, 32, 32)
             nn.ReLU(),
@@ -37,49 +31,73 @@ class ConvAutoencoder(nn.Module):
         x = self.encoder(x)
         x = self.decoder(x)
         return x
-# ------------------------
-# Load the Model
-# ------------------------
+
+# Load model
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = ConvAutoencoder().to(device)
 
 try:
     model.load_state_dict(torch.load("cnn_autoencoder_anomaly.pt", map_location=device))
     model.eval()
-    st.success("Model loaded successfully.")
 except Exception as e:
     st.error(f"Model loading failed: {e}")
 
-# ------------------------
-# Streamlit UI
-# ------------------------
-st.title("🔍 AI-Powered Anomaly Detection in Surveillance")
-
-uploaded_file = st.file_uploader("Upload an image for anomaly detection", type=["jpg", "png", "jpeg"])
-
-if uploaded_file:
-    image = Image.open(uploaded_file).convert("L")  # Convert to grayscale
-    image = image.resize((128, 128))
-    img_tensor = transforms.ToTensor()(image).unsqueeze(0).to(device)
+# Helper function to process a single frame
+def process_frame(frame, model, device):
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    resized = cv2.resize(gray, (128, 128))
+    tensor = torch.tensor(resized / 255.0, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
 
     with torch.no_grad():
-        output = model(img_tensor)
+        output = model(tensor)
+        loss = F.mse_loss(output, tensor)
 
-    # Calculate reconstruction error
-    loss_fn = nn.MSELoss()
-    reconstruction_error = loss_fn(output, img_tensor).item()
-    st.metric(label="Reconstruction Error", value=f"{reconstruction_error:.6f}")
+    recon = output.squeeze().cpu().numpy()
+    return resized, recon, loss.item()
 
-    # Show images
-    col1, col2 = st.columns(2)
-    with col1:
-        st.image(image, caption="Original Image", use_column_width=True)
+# Streamlit UI
+st.title("AI-Powered Anomaly Detection in Surveillance")
+uploaded_file = st.file_uploader("Upload video or image", type=["jpg", "jpeg", "png", "mp4", "avi"])
 
-    with col2:
-        reconstructed = output.squeeze().cpu().numpy()
-        st.image(reconstructed, caption="Reconstructed Image", use_column_width=True)
+if uploaded_file:
+    if uploaded_file.type.startswith("video"):
+        tfile = open("temp_video.mp4", 'wb')
+        tfile.write(uploaded_file.read())
+        cap = cv2.VideoCapture("temp_video.mp4")
 
-    # Show heatmap
-    error_map = np.abs(img_tensor.squeeze().cpu().numpy() - reconstructed)
-    heatmap = cv2.applyColorMap(np.uint8(255 * error_map), cv2.COLORMAP_JET)
-    st.image(heatmap, caption="🔍 Anomaly Heatmap", use_column_width=True)
+        stframe = st.empty()
+        error_plot = st.line_chart([], height=200, use_container_width=True)
+        errors = []
+
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            resized, recon, error = process_frame(frame, model, device)
+            errors.append(error)
+
+            recon_display = (recon * 255).astype(np.uint8)
+            heatmap = cv2.applyColorMap(cv2.convertScaleAbs(cv2.absdiff(resized, recon_display)), cv2.COLORMAP_JET)
+            overlay = cv2.addWeighted(cv2.cvtColor(resized, cv2.COLOR_GRAY2BGR), 0.6, heatmap, 0.4, 0)
+
+            stframe.image(overlay, channels="BGR", caption=f"Reconstruction Error: {error:.4f}")
+            error_plot.add_rows([error])
+
+        cap.release()
+
+    else:
+        img = Image.open(uploaded_file).convert('L')
+        img = img.resize((128, 128))
+        tensor = torch.tensor(np.array(img) / 255.0, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
+
+        with torch.no_grad():
+            output = model(tensor)
+            loss = F.mse_loss(output, tensor)
+            recon = output.squeeze().cpu().numpy()
+
+        heatmap = cv2.applyColorMap(cv2.convertScaleAbs(cv2.absdiff(np.array(img), (recon * 255).astype(np.uint8))), cv2.COLORMAP_JET)
+        overlay = cv2.addWeighted(np.array(img.convert('RGB')), 0.6, heatmap, 0.4, 0)
+
+        st.image(img, caption="Original Image")
+        st.image(overlay, caption=f"Reconstruction Heatmap (Error: {loss.item():.4f})")
