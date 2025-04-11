@@ -38,7 +38,15 @@ if uploaded_video:
 
     # Load model
     model = ConvAutoencoder().to(device)
-    model.load_state_dict(torch.load("cnn_autoencoder_anomaly.pt", map_location=device))  # Load your trained model
+    # Load the checkpoint
+    checkpoint = torch.load("cnn_autoencoder_anomaly.pt", map_location=torch.device('cpu'))
+    
+    # Display the type of object loaded
+    st.write("Checkpoint type:", type(checkpoint))
+    
+    # If it's a dict, show the keys
+    if isinstance(checkpoint, dict):
+        st.write("Checkpoint keys:", checkpoint.keys())
     model.eval()
 
     # Inference
