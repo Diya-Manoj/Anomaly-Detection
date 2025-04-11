@@ -15,21 +15,21 @@ class ConvAutoencoder(nn.Module):
 
         # Encoder
         self.encoder = nn.Sequential(
-            nn.Conv2d(1, 32, 3, stride=2, padding=1),
+            nn.Conv2d(1, 16, 3, stride=2, padding=1),  # -> (16, 64, 64)
             nn.ReLU(),
-            nn.Conv2d(32, 64, 3, stride=2, padding=1),
+            nn.Conv2d(16, 32, 3, stride=2, padding=1), # -> (32, 32, 32)
             nn.ReLU(),
-            nn.Conv2d(64, 128, 3, stride=2, padding=1),
+            nn.Conv2d(32, 64, 3, stride=2, padding=1), # -> (64, 16, 16)
             nn.ReLU()
         )
 
         # Decoder
         self.decoder = nn.Sequential(
-            nn.ConvTranspose2d(128, 64, 3, stride=2, padding=1, output_padding=1),
+            nn.ConvTranspose2d(64, 32, 3, stride=2, padding=1, output_padding=1), # -> (32, 32, 32)
             nn.ReLU(),
-            nn.ConvTranspose2d(64, 32, 3, stride=2, padding=1, output_padding=1),
+            nn.ConvTranspose2d(32, 16, 3, stride=2, padding=1, output_padding=1),  # -> (16, 64, 64)
             nn.ReLU(),
-            nn.ConvTranspose2d(32, 1, 3, stride=2, padding=1, output_padding=1),
+            nn.ConvTranspose2d(16, 1, 3, stride=2, padding=1, output_padding=1),   # -> (1, 128, 128)
             nn.Sigmoid()
         )
 
@@ -37,7 +37,6 @@ class ConvAutoencoder(nn.Module):
         x = self.encoder(x)
         x = self.decoder(x)
         return x
-
 # ------------------------
 # Load the Model
 # ------------------------
