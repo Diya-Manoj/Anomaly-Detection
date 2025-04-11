@@ -14,7 +14,7 @@ st.markdown("# AI-Powered Anomaly Detection in Surveillance")
 
 # Sidebar: model info, threshold, download, credits
 st.sidebar.title("🔧 Settings & Info")
-thresh_slider = st.sidebar.slider("Anomaly Threshold /n(0.01 is frequently used", min_value=0.0, max_value=0.1, value=0.005, step=0.0005)
+thresh_slider = st.sidebar.slider("Anomaly Threshold (0.01 is frequently used", min_value=0.0, max_value=0.1, value=0.005, step=0.0005)
 st.sidebar.markdown("""---
 ### ℹ️ Model Info
 - Type: CNN Autoencoder
