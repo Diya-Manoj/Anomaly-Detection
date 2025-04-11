@@ -1,83 +1,86 @@
 import streamlit as st
-import cv2
-import os
-import numpy as np
 import torch
+import torch.nn as nn
 import torchvision.transforms as transforms
+import numpy as np
+import cv2
 from PIL import Image
-from torchvision.utils import save_image
-from model import ConvAutoencoder  # Make sure your model class is in model.py or adjust import
-from utils import extract_frames, FrameDataset, overlay_heatmap  # Assume you modularized these
 
-# Set device
+# ------------------------
+# Define the Model
+# ------------------------
+class ConvAutoencoder(nn.Module):
+    def __init__(self):
+        super(ConvAutoencoder, self).__init__()
+
+        # Encoder
+        self.encoder = nn.Sequential(
+            nn.Conv2d(1, 32, 3, stride=2, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, 3, stride=2, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(64, 128, 3, stride=2, padding=1),
+            nn.ReLU()
+        )
+
+        # Decoder
+        self.decoder = nn.Sequential(
+            nn.ConvTranspose2d(128, 64, 3, stride=2, padding=1, output_padding=1),
+            nn.ReLU(),
+            nn.ConvTranspose2d(64, 32, 3, stride=2, padding=1, output_padding=1),
+            nn.ReLU(),
+            nn.ConvTranspose2d(32, 1, 3, stride=2, padding=1, output_padding=1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        x = self.encoder(x)
+        x = self.decoder(x)
+        return x
+
+# ------------------------
+# Load the Model
+# ------------------------
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = ConvAutoencoder().to(device)
 
-# App title
-st.title("🔍 AI-Powered Anomaly Detection in Surveillance Video")
-
-# Upload video
-uploaded_video = st.file_uploader("Upload a CCTV video file", type=["mp4", "avi"])
-if uploaded_video:
-    # Save uploaded file
-    video_path = "uploaded_video.mp4"
-    with open(video_path, "wb") as f:
-        f.write(uploaded_video.read())
-    
-    st.video(video_path)
-    
-    st.info("Extracting frames and processing...")
-    extract_frames(video_path, "frames")
-
-    # Load dataset
-    transform = transforms.Compose([
-        transforms.Resize((128, 128)),
-        transforms.ToTensor()
-    ])
-    dataset = FrameDataset("frames", transform=transform)
-    dataloader = torch.utils.data.DataLoader(dataset, batch_size=32, shuffle=False)
-
-    # Load model
-    model = ConvAutoencoder().to(device)
-    # Load the checkpoint
-    checkpoint = torch.load("cnn_autoencoder_anomaly.pt", map_location=torch.device('cpu'))
-    
-    # Display the type of object loaded
-    st.write("Checkpoint type:", type(checkpoint))
-    
-    # If it's a dict, show the keys
-    if isinstance(checkpoint, dict):
-        st.write("Checkpoint keys:", checkpoint.keys())
+try:
+    model.load_state_dict(torch.load("cnn_autoencoder_anomaly.pt", map_location=device))
     model.eval()
+    st.success("Model loaded successfully.")
+except Exception as e:
+    st.error(f"Model loading failed: {e}")
 
-    # Inference
-    reconstruction_errors = []
-    original_frames = []
-    reconstructed_frames = []
+# ------------------------
+# Streamlit UI
+# ------------------------
+st.title("🔍 AI-Powered Anomaly Detection in Surveillance")
+
+uploaded_file = st.file_uploader("Upload an image for anomaly detection", type=["jpg", "png", "jpeg"])
+
+if uploaded_file:
+    image = Image.open(uploaded_file).convert("L")  # Convert to grayscale
+    image = image.resize((128, 128))
+    img_tensor = transforms.ToTensor()(image).unsqueeze(0).to(device)
 
     with torch.no_grad():
-        for batch in dataloader:
-            batch = batch.to(device)
-            output = model(batch)
+        output = model(img_tensor)
 
-            # Save for heatmap
-            original_frames.extend(batch.cpu())
-            reconstructed_frames.extend(output.cpu())
+    # Calculate reconstruction error
+    loss_fn = nn.MSELoss()
+    reconstruction_error = loss_fn(output, img_tensor).item()
+    st.metric(label="Reconstruction Error", value=f"{reconstruction_error:.6f}")
 
-            loss = torch.mean((batch - output) ** 2, dim=[1, 2, 3])
-            reconstruction_errors.extend(loss.cpu().numpy())
+    # Show images
+    col1, col2 = st.columns(2)
+    with col1:
+        st.image(image, caption="Original Image", use_column_width=True)
 
-    # Calculate threshold
-    threshold = np.mean(reconstruction_errors) + 2 * np.std(reconstruction_errors)
+    with col2:
+        reconstructed = output.squeeze().cpu().numpy()
+        st.image(reconstructed, caption="Reconstructed Image", use_column_width=True)
 
-    # Display errors
-    st.subheader("📉 Reconstruction Error Distribution")
-    st.line_chart(reconstruction_errors)
-
-    # Heatmap Overlay
-    st.subheader("🔥 Detected Anomalies with Heatmap Overlay")
-    for i, (orig, recon, err) in enumerate(zip(original_frames, reconstructed_frames, reconstruction_errors)):
-        if err > threshold:
-            heatmap_overlay = overlay_heatmap(orig, recon)
-            st.image(heatmap_overlay, caption=f"Frame {i} - Anomaly Score: {err:.4f}", use_column_width=True)
-
-    st.success("✅ Detection complete.")
+    # Show heatmap
+    error_map = np.abs(img_tensor.squeeze().cpu().numpy() - reconstructed)
+    heatmap = cv2.applyColorMap(np.uint8(255 * error_map), cv2.COLORMAP_JET)
+    st.image(heatmap, caption="🔍 Anomaly Heatmap", use_column_width=True)
