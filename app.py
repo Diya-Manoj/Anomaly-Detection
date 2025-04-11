@@ -1,103 +1,113 @@
 import streamlit as st
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
+import torchvision.transforms as transforms
 import numpy as np
 import cv2
+import os
+from model import ConvAutoencoder
+from matplotlib import pyplot as plt
+from tempfile import NamedTemporaryFile
 from PIL import Image
 
-# Define the CNN Autoencoder
-class ConvAutoencoder(nn.Module):
-    def __init__(self):
-        super(ConvAutoencoder, self).__init__()
-        self.encoder = nn.Sequential(
-            nn.Conv2d(1, 16, 3, stride=2, padding=1),  # -> (16, 64, 64)
-            nn.ReLU(),
-            nn.Conv2d(16, 32, 3, stride=2, padding=1), # -> (32, 32, 32)
-            nn.ReLU(),
-            nn.Conv2d(32, 64, 3, stride=2, padding=1), # -> (64, 16, 16)
-            nn.ReLU()
-        )
-        self.decoder = nn.Sequential(
-            nn.ConvTranspose2d(64, 32, 3, stride=2, padding=1, output_padding=1), # -> (32, 32, 32)
-            nn.ReLU(),
-            nn.ConvTranspose2d(32, 16, 3, stride=2, padding=1, output_padding=1),  # -> (16, 64, 64)
-            nn.ReLU(),
-            nn.ConvTranspose2d(16, 1, 3, stride=2, padding=1, output_padding=1),   # -> (1, 128, 128)
-            nn.Sigmoid()
-        )
+st.set_page_config(layout="wide", page_title="AI-Powered Anomaly Detection")
+st.markdown("# AI-Powered Anomaly Detection in Surveillance")
 
-    def forward(self, x):
-        x = self.encoder(x)
-        x = self.decoder(x)
-        return x
+# Sidebar: model info, threshold, download, credits
+st.sidebar.title("🔧 Settings & Info")
+thresh_slider = st.sidebar.slider("Anomaly Threshold", min_value=0.0, max_value=0.1, value=0.005, step=0.0005)
+st.sidebar.markdown("""---
+### ℹ️ Model Info
+- Type: CNN Autoencoder
+- Input: Grayscale 128x128
+- Encoder: 3 Conv layers
+- Decoder: 3 Transposed Conv layers
+
+### 👩‍💻 Credits
+Developed by Your Name
+Streamlit UI by ChatGPT
+""")
 
 # Load model
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = ConvAutoencoder().to(device)
+checkpoint = torch.load("cnn_autoencoder_anomaly.pt", map_location=device)
+model.load_state_dict(checkpoint)
+model.eval()
 
-try:
-    model.load_state_dict(torch.load("cnn_autoencoder_anomaly.pt", map_location=device))
-    model.eval()
-except Exception as e:
-    st.error(f"Model loading failed: {e}")
+transform = transforms.Compose([
+    transforms.ToTensor(),
+])
 
-# Helper function to process a single frame
-def process_frame(frame, model, device):
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    resized = cv2.resize(gray, (128, 128))
-    tensor = torch.tensor(resized / 255.0, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
+def preprocess_frame(frame):
+    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    frame = cv2.resize(frame, (128, 128))
+    tensor = transform(frame).unsqueeze(0).to(device)
+    return tensor, frame
 
-    with torch.no_grad():
-        output = model(tensor)
-        loss = F.mse_loss(output, tensor)
+def get_reconstruction_error(original, reconstructed):
+    return torch.mean((original - reconstructed) ** 2).item()
 
-    recon = output.squeeze().cpu().numpy()
-    return resized, recon, loss.item()
-
-# Streamlit UI
-st.title("AI-Powered Anomaly Detection in Surveillance")
-uploaded_file = st.file_uploader("Upload video or image", type=["jpg", "jpeg", "png", "mp4", "avi"])
+# Upload input
+uploaded_file = st.file_uploader("Upload video or image", type=["jpg", "jpeg", "png", "mp4", "avi", "mpeg4"])
 
 if uploaded_file:
-    if uploaded_file.type.startswith("video"):
-        tfile = open("temp_video.mp4", 'wb')
-        tfile.write(uploaded_file.read())
-        cap = cv2.VideoCapture("temp_video.mp4")
+    filename = uploaded_file.name
+    file_ext = filename.split(".")[-1].lower()
+    bytes_data = uploaded_file.read()
 
-        stframe = st.empty()
-        error_plot = st.line_chart([], height=200, use_container_width=True)
+    with NamedTemporaryFile(delete=False, suffix=f".{file_ext}") as tmp:
+        tmp.write(bytes_data)
+        temp_path = tmp.name
+
+    # Process image
+    if file_ext in ["jpg", "jpeg", "png"]:
+        image = Image.open(temp_path).convert("L").resize((128, 128))
+        input_tensor = transform(image).unsqueeze(0).to(device)
+        with torch.no_grad():
+            reconstructed = model(input_tensor)
+        error = get_reconstruction_error(input_tensor, reconstructed)
+
+        st.image(image, caption=f"Reconstruction Error: {error:.4f}", use_column_width=True)
+
+    # Process video
+    elif file_ext in ["mp4", "avi", "mpeg4"]:
+        cap = cv2.VideoCapture(temp_path)
         errors = []
+        frames = []
+        heatmaps = []
 
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
                 break
 
-            resized, recon, error = process_frame(frame, model, device)
+            tensor, raw_frame = preprocess_frame(frame)
+            with torch.no_grad():
+                reconstructed = model(tensor)
+
+            error = get_reconstruction_error(tensor, reconstructed)
             errors.append(error)
-
-            recon_display = (recon * 255).astype(np.uint8)
-            heatmap = cv2.applyColorMap(cv2.convertScaleAbs(cv2.absdiff(resized, recon_display)), cv2.COLORMAP_JET)
-            overlay = cv2.addWeighted(cv2.cvtColor(resized, cv2.COLOR_GRAY2BGR), 0.6, heatmap, 0.4, 0)
-
-            stframe.image(overlay, channels="BGR", caption=f"Reconstruction Error: {error:.4f}")
-            error_plot.add_rows([error])
+            frames.append(raw_frame)
 
         cap.release()
 
-    else:
-        img = Image.open(uploaded_file).convert('L')
-        img = img.resize((128, 128))
-        tensor = torch.tensor(np.array(img) / 255.0, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
+        # Show graph
+        st.line_chart(errors)
 
-        with torch.no_grad():
-            output = model(tensor)
-            loss = F.mse_loss(output, tensor)
-            recon = output.squeeze().cpu().numpy()
+        # Show top anomalies
+        anomalies = [(i, e) for i, e in enumerate(errors) if e > thresh_slider]
+        anomalies.sort(key=lambda x: x[1], reverse=True)
 
-        heatmap = cv2.applyColorMap(cv2.convertScaleAbs(cv2.absdiff(np.array(img), (recon * 255).astype(np.uint8))), cv2.COLORMAP_JET)
-        overlay = cv2.addWeighted(np.array(img.convert('RGB')), 0.6, heatmap, 0.4, 0)
+        st.markdown("### 🔥 Top Anomalies")
+        col1, col2, col3 = st.columns(3)
+        if anomalies:
+            for i, (idx, err) in enumerate(anomalies[:3]):
+                with [col1, col2, col3][i % 3]:
+                    st.image(frames[idx], caption=f"Frame {idx} - Error: {err:.4f}", use_column_width=True)
 
-        st.image(img, caption="Original Image")
-        st.image(overlay, caption=f"Reconstruction Heatmap (Error: {loss.item():.4f})")
+        # Save anomaly logs
+        log_txt = "Frame,Error\n" + "\n".join([f"{idx},{err:.6f}" for idx, err in anomalies])
+        with open("anomaly_log.csv", "w") as f:
+            f.write(log_txt)
+
+        st.sidebar.download_button("📥 Download Anomaly Log", data=log_txt, file_name="anomaly_log.csv")
